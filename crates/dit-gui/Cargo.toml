@@ -1,0 +1,27 @@
+[package]
+name = "dit-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DIT desktop GUI application (Tauri backend)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dit-core = { path = "../dit-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dotenvy = "0.15"
+base64 = "0.22"
+git2.workspace = true
+
+[lib]
+name = "dit_gui"
+crate-type = ["staticlib", "cdylib", "rlib"]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegoodthings/tauri-plugins-workspace/v2/schemas/capability.json",
+  "identifier": "default",
+  "description": "Default permissions for the DIT app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "shell:allow-open"
+  ]
+}
