@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="dit.svg" alt="DIT Logo" width="200">
+</p>
+
 # DIT — Design Version Control
 
 Git-style version control for design files. DIT downloads your Figma designs as native `.fig` files, converts them to deterministic JSON for text-based diffs, and stores everything in a normal Git repository — enabling branching, ~~merging~~, diffing, and full history for design work.
 
 **MVP scope:** Figma integration only.
+
+<p align="center">
+  <img src="screenshot.png" alt="DIT Desktop App" width="700">
+</p>
 
 ## Architecture
 
