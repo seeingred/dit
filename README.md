@@ -30,7 +30,7 @@ scripts/
 - **Playwright Chromium**: installed automatically via `npx playwright install chromium`
 - **Figma account**: with either:
   - Browser auth cookie (`__Host-figma.authn`), or
-  - Email and password (no 2FA)
+  - Email and password (2FA supported — DIT will prompt for the code)
 
 ## Build
 
@@ -68,17 +68,24 @@ cargo tauri dev
 
 ## Quick Start
 
-### 1. Initialize a repository
+### 1. Initialize or clone a repository
 
 ```bash
+# Start fresh
 mkdir my-design && cd my-design
 dit init
+
+# Or clone an existing DIT/git repo
+dit clone git@github.com:team/design-repo.git
+dit clone https://github.com/team/design-repo.git
 ```
 
-DIT will prompt you to:
+For `dit init`, DIT will prompt you to:
 - Select your design platform (Figma)
 - Choose auth method: browser cookie or email/password
 - Enter the file key (from the Figma file URL: `figma.com/design/<FILE_KEY>/...`)
+
+For `dit clone`, if the URL is SSH, DIT will let you pick an SSH key from `~/.ssh/`. If the cloned repo is already a DIT repo, it opens directly (prompting for Figma credentials if missing). If it's a plain git repo, DIT runs the init flow.
 
 Your credentials are saved to `.env` (git-ignored).
 
@@ -136,6 +143,7 @@ Both the canonical JSON and `.fig` snapshot files are pushed and pulled. After c
 
 | Command | Description |
 |---------|-------------|
+| `dit clone <url> [path]` | Clone a git repo (initializes DIT if needed) |
 | `dit init` | Initialize a new DIT repository |
 | `dit status` | Show branch and change status |
 | `dit commit -m "msg"` | Download .fig, convert to JSON, commit |
@@ -163,9 +171,12 @@ my-design/
   dit.fig/                  .fig file snapshots (committed to git)
     latest.fig              Current commit's .fig file
     <hash>.fig              Previous commits' .fig files
+  dit.previews/             Preview screenshots (committed to git)
+    latest.png              Current commit's preview
+    <hash>.png              Previous commits' previews
   .dit/                     Internal metadata (git-ignored)
-    config.json             DIT configuration
-    fig_snapshots/          Legacy local .fig copies
+    config.json             DIT configuration (bootstrapped from dit.json on clone)
+    fig_snapshots/          Local .fig cache for fast restore
       <hash>.fig
   .env                      Figma credentials (git-ignored)
   .gitignore
@@ -196,7 +207,7 @@ DIT uses Playwright to automate `.fig` file downloads from Figma. Two auth metho
 **Email/password:**
 - Provide during `dit init`
 - Stored in `.env` as `FIGMA_EMAIL` and `FIGMA_PASSWORD`
-- Note: 2FA is not supported with this method
+- 2FA is supported — DIT will prompt for the authentication code in the CLI or show an input dialog in the GUI
 
 ## Acknowledgements
 

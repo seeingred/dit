@@ -68,7 +68,7 @@ The central library. Every module is re-exported from `lib.rs`.
 - **`DitProject`** — File metadata: file_key, name, version, platform, schema_version
 - **`DitPage`** — Single page: id, name, background_color, children (Vec<DitNode>)
 - **`DitNode`** — Any design element. 50+ optional fields covering geometry, appearance, layout, text, components, vectors, effects. Recursive via `children: Option<Vec<DitNode>>`
-- **`DitConfig`** — Persistent repo config: file_key, name, figma_token, schema_version
+- **`DitConfig`** — Persistent repo config: file_key, name, figma_token, schema_version, ssh_key_path
 - **`DitStatus`** — Working tree state: branch, head, changes, is_dirty
 - **`DitCommitMeta`** — Commit info: hash, message, author, timestamp
 
@@ -86,6 +86,7 @@ The central library. Every module is re-exported from `lib.rs`.
 | `CONFIG_FILE` | `.dit/config.json` | No |
 | `FIG_SNAPSHOTS_DIR` | `.dit/fig_snapshots` | No (legacy local copy) |
 | `FIG_DIR` | `dit.fig` | Yes |
+| `PREVIEWS_DIR` | `dit.previews` | Yes |
 | `PROJECT_FILE` | `dit.json` | Yes |
 | `PAGES_DIR` | `dit.pages` | Yes |
 | `NODES_DIR` | `dit.nodes` | Yes |
@@ -127,7 +128,12 @@ File-based RAII locking in `.dit/locks/`:
 
 ### git_ops.rs — Git Operations
 
-Uses `git2` (libgit2) for local operations, shells out to `git` CLI for push/pull (credential helper compatibility).
+Uses `git2` (libgit2) for local operations, shells out to `git` CLI for clone/push/pull (credential helper compatibility).
+
+**SSH key support:**
+- `list_ssh_keys()` — scans `~/.ssh/` for private keys
+- `is_ssh_url(url)` — detects SSH URLs (`git@...`, `ssh://...`)
+- SSH key passed via `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes"` to git subprocesses
 
 **Local operations (git2):**
 - `init_repository()` — create repo, set HEAD to "main", write .gitignore, initial commit
@@ -136,9 +142,10 @@ Uses `git2` (libgit2) for local operations, shells out to `git` CLI for push/pul
 - ~~`merge()` — merge analysis (up-to-date / fast-forward / recursive), returns `MergeResult` with conflict info and `.fig` snapshot paths from both branches~~ *(not available in MVP)*
 
 **Remote operations (git CLI):**
-- `push()`, `pull()` — shell out to `git push`/`git pull` to inherit system credential helpers
+- `clone_repo(url, path, ssh_key_path)` — shells out to `git clone`
+- `push()`, `pull()` — shell out to `git push`/`git pull`, use SSH key from config if set
 
-**DIT_TRACKED paths:** `["dit.json", "dit.pages/", "dit.nodes/", "dit.assets/", "dit.fig/", "dit.styles.json", "dit.components.json"]`
+**DIT_TRACKED paths:** `["dit.json", "dit.pages/", "dit.nodes/", "dit.assets/", "dit.fig/", "dit.previews/", "dit.styles.json", "dit.components.json"]`
 
 ### repository.rs — DitRepository
 
@@ -146,12 +153,13 @@ High-level API orchestrating all modules:
 
 ```rust
 DitRepository::init(dir, config) → Result<Self>
-DitRepository::open(dir) → Result<Self>
+DitRepository::open(dir) → Result<Self>           // bootstraps config from dit.json if missing
+DitRepository::clone(url, dir, ssh_key) → Result<CloneResult>  // clone + detect DIT repo
 
 // Commit workflows
-repo.commit(snapshot, message, options) → Result<String>         // from DitSnapshot
-repo.commit_from_fig(file_key, auth, message) → Result<String>  // download + convert + commit
-repo.commit_from_local_fig(path, file_key, message) → Result<String>  // local .fig
+repo.commit(snapshot, message, options) → Result<String>                    // from DitSnapshot
+repo.commit_from_fig(file_key, auth, message, on_progress, on_2fa) → ...  // download + convert + commit
+repo.commit_from_local_fig(path, file_key, message) → Result<String>       // local .fig
 
 // Read
 repo.read_current_snapshot() → Result<DitSnapshot>
@@ -165,23 +173,34 @@ repo.create_branch(name), repo.checkout(ref_name)
 // repo.merge(branch) → Result<MergeResult>  // not available in MVP
 
 // Restore
-repo.restore(commit_hash) → Result<RestoreResult>  // returns snapshot + .fig path
+repo.restore(commit_hash) → Result<RestoreResult>  // returns snapshot + .fig path (cached to .dit/)
 
-// Remote
+// Remote (uses SSH key from config if set)
 repo.push(remote, branch), repo.pull(remote, branch)
 ```
 
+**`CloneResult` enum:** `DitRepo(DitRepository)` | `NeedsInit { path }`
+
 **`commit_from_fig` flow:**
 1. Acquire lock
-2. Download `.fig` via Playwright → `.dit/tmp_download.fig`
+2. Download `.fig` via Playwright → `.dit/tmp_download.fig` (handles 2FA if needed via `on_2fa` callback)
 3. Capture preview screenshot → `.dit/tmp_preview.png`
 4. Convert `.fig` → `DitSnapshot` via fig2json
 5. Write canonical JSON to disk
 6. Pre-stage `.fig` to `dit.fig/latest.fig` (git-tracked)
-7. Git commit all DIT-tracked files (includes `dit.fig/latest.fig`)
-8. Store `.fig` as `dit.fig/<hash>.fig` + `.dit/fig_snapshots/<hash>.fig`
-9. Store preview at `.dit/previews/<7char_hash>.png`
-10. Clean up temp files, release lock
+7. Pre-stage preview to `dit.previews/latest.png` (git-tracked)
+8. Git commit all DIT-tracked files
+9. Store `.fig` as `dit.fig/<hash>.fig` + `.dit/fig_snapshots/<hash>.fig`
+10. Store preview as `dit.previews/<hash>.png`
+11. Clean up temp files, release lock
+
+**Restore flow:**
+1. Acquire lock, remember current branch
+2. Checkout target commit (detached HEAD)
+3. Read snapshot + locate `.fig` file at that commit
+4. Copy `.fig` to `.dit/fig_snapshots/<hash>.fig` (stable path that survives checkout)
+5. Return to original branch
+6. Return snapshot + stable `.fig` path
 
 ### figma/downloader.rs — .fig Download
 
@@ -203,6 +222,8 @@ Embeds `scripts/download-fig.mjs` and `scripts/package.json` via `include_str!` 
 
 **`FigmaAuth` enum:** `Cookie(String)` or `EmailPassword { email, password }`.
 
+**2FA support:** `download_fig_file` accepts an `on_2fa` callback. If the script detects a 2FA prompt (on the login page or in an iframe), it prints `[DIT:2FA_REQUIRED]` to stdout and reads the code from stdin. The Rust side intercepts this, calls `on_2fa` to get the code from the user, and writes it back.
+
 ### figma/fig_converter.rs — .fig → Snapshot
 
 Converts `.fig` binary to `DitSnapshot`:
@@ -221,6 +242,7 @@ Single file: `src/main.rs`. Uses clap for argument parsing.
 
 | Command | Function | Description |
 |---------|----------|-------------|
+| `dit clone <url> [path]` | `cmd_clone()` | Clone git repo, detect DIT, SSH key picker |
 | `dit init` | `cmd_init()` | Interactive setup with dialoguer prompts |
 | `dit status` | `cmd_status()` | Show branch + changes |
 | `dit commit -m "msg"` | `cmd_commit()` | Download .fig, convert, commit |
@@ -246,7 +268,7 @@ Tauri 2 desktop app. Backend in `src/lib.rs`, frontend in `frontend/`.
 
 Tauri command handlers — thin wrappers around `DitRepository` methods. State managed via `Mutex<Option<DitRepository>>`.
 
-**Key commands:** `init_repo`, `open_repo`, `get_status`, `get_log`, `get_branches`, `commit` (emits `commit-progress` events), `restore`, `checkout`, `create_branch`, `merge`, `push`, `pull`, `get_preview_image` (base64 PNG), `get_commit_tree` (TreeNodeInfo).
+**Key commands:** `list_ssh_keys`, `clone_repo` (returns `CloneInfo` with `needs_auth`), `save_credentials`, `init_repo`, `open_repo` (returns `OpenRepoInfo` with `needs_auth`), `get_status`, `get_log`, `get_branches`, `commit` (emits `commit-progress` and `2fa-required` events), `submit_2fa_code`, `restore`, `checkout`, `create_branch`, `merge`, `push`, `pull`, `get_preview_image` (base64 PNG), `get_commit_tree` (TreeNodeInfo).
 
 ### Frontend (React 19 + Tailwind 3)
 
@@ -255,7 +277,7 @@ Tauri command handlers — thin wrappers around `DitRepository` methods. State m
 | Component | File | Purpose |
 |-----------|------|---------|
 | `App` | `App.tsx` | Root — manages startup vs main view |
-| `StartupFlow` | `StartupFlow.tsx` | Repo init wizard (folder, auth, file key) |
+| `StartupFlow` | `StartupFlow.tsx` | Repo open/init/clone wizard (folder, clone URL, SSH key, auth, file key) |
 | `MainLayout` | `MainLayout.tsx` | Main window with commit list + preview |
 | `CommitList` | `CommitList.tsx` | Scrollable list with thumbnails, diff selection |
 | `PreviewPanel` | `PreviewPanel.tsx` | Canvas preview + tree viewer |
@@ -263,12 +285,12 @@ Tauri command handlers — thin wrappers around `DitRepository` methods. State m
 | `DiffView` | `DiffView.tsx` | Side-by-side before/after previews |
 | `ActionToolbar` | `ActionToolbar.tsx` | Commit, push, pull buttons |
 | `BranchSelector` | `BranchSelector.tsx` | Branch dropdown + create |
-| `CommitOverlay` | `CommitOverlay.tsx` | Progress overlay during commit |
+| `CommitOverlay` | `CommitOverlay.tsx` | Progress overlay during commit + 2FA input |
 | `CommandBar` | `CommandBar.tsx` | Command history input |
 
 **Theme:** CSS custom properties with `@media (prefers-color-scheme: dark)` in `index.css`. Tailwind configured with CSS variable references.
 
-**Types** (`types.ts`): `CommitInfo`, `RepoStatus`, `BranchInfo`, `DiffResult`, `RestoreInfo`, `TreeNode`, `DirCheck`.
+**Types** (`types.ts`): `CommitInfo`, `RepoStatus`, `BranchInfo`, `DiffResult`, `RestoreInfo`, `TreeNode`, `DirCheck`, `CloneInfo`, `SshKeyInfo`.
 
 **Build:** Vite + TypeScript. `npm run build` produces `frontend/dist/`.
 
@@ -281,12 +303,15 @@ Playwright browser automation script embedded in the Rust binary at compile time
 2. Block analytics/tracking scripts (GTM, Sentry, Amplitude, FullStory)
 3. Dismiss GDPR/cookie popups
 4. Authenticate (cookie injection or email/password login)
-5. Wait for `[data-testid="ProfileButton"]` (auth confirmation)
-6. Navigate to `https://www.figma.com/design/<file_key>/`
-7. Wait for `#toggle-menu-button` (editor loaded)
-8. Capture preview screenshot if `--preview-output` specified
-9. Click: Main Menu → File → Save local copy
-10. Wait for download event, save `.fig` file
+5. Race: wait for auth success (account dropdown / sidebar nav) OR 2FA prompt
+6. If 2FA: print `[DIT:2FA_REQUIRED]` to stdout, read code from stdin, submit
+7. Navigate to `https://www.figma.com/design/<file_key>/`
+8. Wait for `button "Main menu"` (editor loaded)
+9. Capture preview screenshot if `--preview-output` specified
+10. Click: Main menu → File (menuitemcheckbox, regex) → Save local copy (regex)
+11. Wait for download event, save `.fig` file
+
+**Selectors** use Playwright role-based locators with regex to handle Figma's zero-width space characters in menu item names.
 
 **Critical:** Uses `channel: "chrome"` (system Chrome) because Playwright's bundled Chromium lacks WebGL support, which Figma's editor requires.
 
@@ -305,12 +330,13 @@ my-design/
 ├── dit.fig/                  Git-tracked .fig file snapshots (committed)
 │   ├── latest.fig            Current commit's .fig file
 │   └── <hash>.fig            Previous commits' .fig files
+├── dit.previews/             Git-tracked preview screenshots (committed)
+│   ├── latest.png            Current commit's preview
+│   └── <hash>.png            Previous commits' previews
 ├── .dit/                     Local metadata (git-ignored)
-│   ├── config.json           DIT configuration
-│   ├── fig_snapshots/        Legacy local .fig copies
+│   ├── config.json           DIT configuration (bootstrapped from dit.json on clone)
+│   ├── fig_snapshots/        Local .fig cache for fast restore
 │   │   └── <hash>.fig
-│   ├── previews/             Preview PNGs per commit
-│   │   └── <7char>.png
 │   └── locks/                Active operation locks
 ├── .env                      Figma credentials (git-ignored)
 └── .gitignore
@@ -376,3 +402,6 @@ cd crates/dit-gui/frontend && npm install
 6. **fig2json normalization** — fig2json returns non-standard enum objects and guid structures that must be flattened before DIT type deserialization
 7. **Per-page file splitting** — each page is a separate JSON file for natural diffing and smaller change sets
 8. **Content-addressed assets** — SHA-256 dedup prevents bloating git history with duplicate images
+9. **SSH key selection** — users pick from `~/.ssh/` keys during clone; stored in config for push/pull. Host-agnostic (works with GitHub, GitLab, Bitbucket, etc.)
+10. **Config bootstrapping on clone** — `.dit/config.json` (git-ignored) is auto-populated from `dit.json` (committed) after cloning, so only credentials need to be re-entered
+11. **Preview screenshots committed** — `dit.previews/` is git-tracked so cloning gives full commit thumbnails
