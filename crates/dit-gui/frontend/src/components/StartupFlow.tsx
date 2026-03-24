@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   initRepo,
   openRepo,
   checkDirectory,
+  cloneRepo,
+  listSshKeys,
 } from "../commands";
+import type { SshKeyInfo } from "../types";
 
 interface StartupFlowProps {
   onRepoOpened: (path: string) => void;
 }
 
-type Step = "pick-folder" | "figma-auth" | "figma-file" | "creating";
+type Step = "pick-folder" | "clone" | "cloning" | "figma-auth" | "figma-file" | "creating";
 type AuthMethod = "cookie" | "email";
 
 /** Extract a Figma file key from any Figma URL or raw key. */
@@ -38,9 +41,28 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
   const [fileKey, setFileKey] = useState("");
   const [fileName, setFileName] = useState("");
 
+  // Clone state
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [clonePath, setClonePath] = useState("");
+  const [sshKeys, setSshKeys] = useState<SshKeyInfo[]>([]);
+  const [selectedSshKey, setSelectedSshKey] = useState<string | null>(null);
+  const isCloneSsh = cloneUrl.startsWith("git@") || cloneUrl.startsWith("ssh://");
+
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+
+  // Load SSH keys when entering clone step
+  useEffect(() => {
+    if (step === "clone") {
+      listSshKeys().then((keys) => {
+        setSshKeys(keys);
+        if (keys.length > 0 && !selectedSshKey) {
+          setSelectedSshKey(keys[0].path);
+        }
+      }).catch(() => setSshKeys([]));
+    }
+  }, [step]);
 
   const handlePickFolder = async () => {
     try {
@@ -75,6 +97,43 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
     setError(null);
   };
 
+  const handlePickCloneFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, multiple: false });
+      if (selected) {
+        setClonePath(selected as string);
+        setError(null);
+      }
+    } catch {
+      // Running outside Tauri (dev in browser)
+    }
+  };
+
+  const handleClone = async () => {
+    if (!cloneUrl.trim() || !clonePath.trim()) return;
+    setLoading(true);
+    setError(null);
+    setStep("cloning");
+    try {
+      const sshKey = isCloneSsh ? selectedSshKey : null;
+      const result = await cloneRepo(cloneUrl, clonePath, sshKey);
+      if (result.is_dit_repo) {
+        // Already a DIT repo — open it directly
+        onRepoOpened(result.path);
+      } else {
+        // Plain git repo — need to initialize DIT
+        setFolderPath(result.path);
+        setStep("figma-auth");
+      }
+    } catch (e) {
+      setError(String(e));
+      setStep("clone");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const hasValidAuth = authMethod === "cookie"
     ? authCookie.trim().length > 0
     : authEmail.trim().length > 0 && authPassword.trim().length > 0;
@@ -98,11 +157,11 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
   const handleCreateRepo = async () => {
     if (!fileKey || !fileName.trim()) return;
 
-    // Check if directory already has a repo.
+    // Only warn if there's an existing DIT repo (not just git — git is fine).
     if (!confirmOverwrite) {
       try {
         const check = await checkDirectory(folderPath);
-        if (check.has_dit || check.has_git) {
+        if (check.has_dit) {
           setConfirmOverwrite(true);
           return;
         }
@@ -129,6 +188,7 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
         fileKey,
         fileName,
         force,
+        selectedSshKey,
       );
       onRepoOpened(folderPath);
     } catch (e) {
@@ -226,9 +286,118 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
                 Initialize New
               </button>
             </div>
+            <div className="relative flex items-center my-4">
+              <div className="flex-1 border-t border-dit-border" />
+              <span className="px-3 text-dit-text-muted text-xs">or</span>
+              <div className="flex-1 border-t border-dit-border" />
+            </div>
+            <button
+              onClick={() => { setStep("clone"); setError(null); }}
+              className="w-full px-4 py-3 bg-dit-surface border border-dit-border rounded-lg
+                         text-dit-text hover:border-dit-accent transition-colors text-sm"
+            >
+              Clone Repository
+            </button>
             <p className="text-dit-text-muted text-xs text-center mt-4">
-              Choose a folder containing a DIT repository, or initialize a new one.
+              Open an existing DIT repo, initialize a new one, or clone from a URL.
             </p>
+          </div>
+        )}
+
+        {/* Step: Clone */}
+        {step === "clone" && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-dit-text text-sm font-medium mb-2">
+                Repository URL
+              </label>
+              <input
+                type="text"
+                value={cloneUrl}
+                onChange={(e) => setCloneUrl(e.target.value)}
+                placeholder="https://github.com/user/repo.git"
+                className="w-full bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                           text-dit-text placeholder:text-dit-text-muted text-sm
+                           focus:outline-none focus:border-dit-accent transition-colors"
+              />
+            </div>
+            <div>
+              <label className="block text-dit-text text-sm font-medium mb-2">
+                Clone into
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={clonePath}
+                  onChange={(e) => setClonePath(e.target.value)}
+                  placeholder="Select a folder..."
+                  className="flex-1 bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                             text-dit-text placeholder:text-dit-text-muted text-sm
+                             focus:outline-none focus:border-dit-accent transition-colors"
+                />
+                <button
+                  onClick={handlePickCloneFolder}
+                  className="px-4 py-3 bg-dit-surface border border-dit-border rounded-lg
+                             text-dit-text-muted hover:text-dit-text hover:border-dit-accent
+                             transition-colors text-sm"
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+            {/* SSH key picker — shown when URL is SSH */}
+            {isCloneSsh && (
+              <div>
+                <label className="block text-dit-text text-sm font-medium mb-2">
+                  SSH Key
+                </label>
+                {sshKeys.length > 0 ? (
+                  <select
+                    value={selectedSshKey ?? ""}
+                    onChange={(e) => setSelectedSshKey(e.target.value || null)}
+                    className="w-full bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                               text-dit-text text-sm
+                               focus:outline-none focus:border-dit-accent transition-colors"
+                  >
+                    {sshKeys.map((key) => (
+                      <option key={key.path} value={key.path}>
+                        {key.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-dit-text-muted text-xs px-1">
+                    No SSH keys found in ~/.ssh/
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setStep("pick-folder"); setError(null); }}
+                className="px-4 py-3 bg-dit-surface border border-dit-border rounded-lg
+                           text-dit-text-muted hover:text-dit-text transition-colors text-sm"
+              >
+                Back
+              </button>
+              <button
+                onClick={handleClone}
+                disabled={!cloneUrl.trim() || !clonePath.trim() || loading || (isCloneSsh && sshKeys.length === 0)}
+                className="flex-1 px-4 py-3 bg-dit-accent text-white rounded-lg font-medium
+                           hover:bg-dit-accent-hover transition-colors text-sm
+                           disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Clone
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step: Cloning */}
+        {step === "cloning" && (
+          <div className="text-center py-8">
+            <div className="animate-spin w-8 h-8 border-2 border-dit-accent border-t-transparent rounded-full mx-auto mb-4" />
+            <p className="text-dit-text text-sm">Cloning repository...</p>
           </div>
         )}
 

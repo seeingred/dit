@@ -145,6 +145,7 @@ fn assets_survive_commit_workflow() {
             name: "Asset Test".into(),
             figma_token: None,
             schema_version: 1,
+            ssh_key_path: None,
         },
     )
     .unwrap();

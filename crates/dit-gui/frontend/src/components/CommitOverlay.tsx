@@ -1,9 +1,14 @@
+import { useState } from "react";
+
 interface CommitOverlayProps {
   steps: string[];
   isComplete: boolean;
+  needs2fa?: boolean;
+  onSubmit2fa?: (code: string) => void;
 }
 
-export function CommitOverlay({ steps, isComplete }: CommitOverlayProps) {
+export function CommitOverlay({ steps, isComplete, needs2fa, onSubmit2fa }: CommitOverlayProps) {
+  const [tfaCode, setTfaCode] = useState("");
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
       <div className="bg-dit-surface border border-dit-border rounded-xl p-6 w-96 shadow-2xl">
@@ -91,6 +96,44 @@ export function CommitOverlay({ steps, isComplete }: CommitOverlayProps) {
             );
           })}
         </div>
+
+        {needs2fa && !isComplete && (
+          <div className="mt-4 pt-4 border-t border-dit-border space-y-3">
+            <p className="text-dit-text text-sm font-medium">
+              Figma requires two-factor authentication
+            </p>
+            <input
+              type="text"
+              value={tfaCode}
+              onChange={(e) => setTfaCode(e.target.value)}
+              placeholder="Enter authentication code"
+              autoFocus
+              className="w-full bg-dit-bg border border-dit-border rounded-lg px-4 py-3
+                         text-dit-text placeholder:text-dit-text-muted text-sm
+                         focus:outline-none focus:border-dit-accent transition-colors"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && tfaCode.trim() && onSubmit2fa) {
+                  onSubmit2fa(tfaCode.trim());
+                  setTfaCode("");
+                }
+              }}
+            />
+            <button
+              onClick={() => {
+                if (tfaCode.trim() && onSubmit2fa) {
+                  onSubmit2fa(tfaCode.trim());
+                  setTfaCode("");
+                }
+              }}
+              disabled={!tfaCode.trim()}
+              className="w-full px-4 py-3 bg-dit-accent text-white rounded-lg font-medium
+                         hover:bg-dit-accent-hover transition-colors text-sm
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Submit Code
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

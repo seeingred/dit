@@ -8,7 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use dit_core::figma::{augment_node_path, resolve_command, setup_downloader, FigmaAuth};
 use dit_core::git_ops;
-use dit_core::repository::DitRepository;
+use dit_core::repository::{CloneResult, DitRepository};
 use dit_core::types::DitPaths;
 
 // ── CLI definition ───────────────────────────────────────────────────
@@ -22,6 +22,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Clone a git repository (initializes DIT if needed)
+    Clone {
+        /// Git repository URL
+        url: String,
+        /// Directory to clone into (defaults to repo name from URL)
+        path: Option<PathBuf>,
+    },
     /// Initialize a new DIT repository
     Init,
     /// Show working tree status
@@ -107,6 +114,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Commands::Clone { url, path } => cmd_clone(&url, path),
         Commands::Init => cmd_init(),
         Commands::Status => cmd_status(),
         Commands::Commit { m, fig, local } => cmd_commit(&m, fig.as_deref(), local),
@@ -181,6 +189,217 @@ fn read_config(repo_root: &Path) -> Result<dit_core::types::DitConfig> {
 }
 
 // ── Commands ─────────────────────────────────────────────────────────
+
+/// Derive a directory name from a git URL (like `git clone` does).
+fn dir_name_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+    trimmed.rsplit('/').next().map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+fn cmd_clone(url: &str, path: Option<PathBuf>) -> Result<()> {
+    let target = match path {
+        Some(p) => p,
+        None => {
+            let name = dir_name_from_url(url)
+                .context("Could not derive directory name from URL. Specify a path explicitly.")?;
+            PathBuf::from(&name)
+        }
+    };
+
+    // If SSH URL, let the user pick a key.
+    let ssh_key = if git_ops::is_ssh_url(url) {
+        let keys = git_ops::list_ssh_keys();
+        if keys.is_empty() {
+            println!(
+                "  {} No SSH keys found in ~/.ssh/",
+                style("!").yellow().bold()
+            );
+            None
+        } else {
+            let items: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+            let selection = dialoguer::Select::new()
+                .with_prompt("Select SSH key for this repository")
+                .items(&items)
+                .default(0)
+                .interact()
+                .context("selection cancelled")?;
+            Some(keys[selection].path.clone())
+        }
+    } else {
+        None
+    };
+
+    let sp = spinner("Cloning repository...");
+    let result = DitRepository::clone(url, &target, ssh_key.as_deref())?;
+    sp.finish_with_message("Clone complete");
+
+    match result {
+        CloneResult::DitRepo(repo) => {
+            // Store the SSH key in config if one was selected.
+            if ssh_key.is_some() {
+                if let Ok(mut config) = repo.config() {
+                    config.ssh_key_path = ssh_key.clone();
+                    let config_json = serde_json::to_string_pretty(&config)
+                        .context("failed to serialize config")?;
+                    std::fs::write(repo.root().join(DitPaths::CONFIG_FILE), &config_json)?;
+                }
+            }
+            let name = repo.config().map(|c| c.name).unwrap_or_else(|_| "Unknown".into());
+            println!();
+            println!(
+                "  {} Cloned DIT repository: {}",
+                style("✓").green().bold(),
+                style(&name).cyan()
+            );
+            println!(
+                "  {}",
+                style(repo.root().display()).dim()
+            );
+        }
+        CloneResult::NeedsInit { path } => {
+            println!();
+            println!(
+                "  {} Cloned plain git repository — initializing DIT...",
+                style("→").cyan().bold()
+            );
+            init_dit_in(&path, ssh_key)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Initialize DIT in an existing (already cloned) git directory.
+/// Reuses the interactive prompts from `cmd_init` but skips git init
+/// (the repo already exists).
+fn init_dit_in(path: &Path, ssh_key: Option<String>) -> Result<()> {
+    // 1. Prompt for design platform.
+    let platforms = &["Figma"];
+    let selection = dialoguer::Select::new()
+        .with_prompt("Select design platform")
+        .items(platforms)
+        .default(0)
+        .interact()
+        .context("selection cancelled")?;
+
+    if selection != 0 {
+        bail!("Only Figma is supported in this version.");
+    }
+
+    // 2. Ask for file key.
+    let file_key: String = dialoguer::Input::new()
+        .with_prompt("Enter Figma file key (from the URL)")
+        .interact_text()
+        .context("input cancelled")?;
+
+    // 3. Ask for project name.
+    let file_name: String = dialoguer::Input::new()
+        .with_prompt("Enter project name")
+        .interact_text()
+        .context("input cancelled")?;
+
+    // 4. Collect Figma auth.
+    println!();
+    println!(
+        "  {} DIT uses Playwright to download .fig files from Figma.",
+        style("→").cyan().bold()
+    );
+    println!("  Choose an authentication method:");
+    let auth_methods = &["Browser cookie (FIGMA_AUTH_COOKIE)", "Email + password"];
+    let auth_choice = dialoguer::Select::new()
+        .with_prompt("Authentication method")
+        .items(auth_methods)
+        .default(0)
+        .interact()
+        .context("selection cancelled")?;
+
+    let mut env_lines = Vec::new();
+    if auth_choice == 0 {
+        let cookie: String = dialoguer::Password::new()
+            .with_prompt("Figma auth cookie value")
+            .interact()
+            .context("input cancelled")?;
+        env_lines.push(format!("FIGMA_AUTH_COOKIE={cookie}"));
+    } else {
+        let email: String = dialoguer::Input::new()
+            .with_prompt("Figma email")
+            .interact_text()
+            .context("input cancelled")?;
+        let password: String = dialoguer::Password::new()
+            .with_prompt("Figma password")
+            .interact()
+            .context("input cancelled")?;
+        env_lines.push(format!("FIGMA_EMAIL={email}"));
+        env_lines.push(format!("FIGMA_PASSWORD={password}"));
+    }
+
+    // 5. Create .dit structure (git repo already exists).
+    let sp = spinner("Initializing DIT...");
+
+    let dit_dir = path.join(DitPaths::DIT_DIR);
+    std::fs::create_dir_all(&dit_dir)
+        .context("failed to create .dit directory")?;
+
+    // Write .dit/config.json.
+    let config = dit_core::types::DitConfig {
+        file_key: file_key.clone(),
+        name: file_name.clone(),
+        figma_token: None,
+        schema_version: 1,
+        ssh_key_path: ssh_key.clone(),
+    };
+    let config_json = serde_json::to_string_pretty(&config)?;
+    std::fs::write(path.join(DitPaths::CONFIG_FILE), &config_json)?;
+
+    // Create tracked directories.
+    std::fs::create_dir_all(path.join(DitPaths::PAGES_DIR))?;
+    std::fs::create_dir_all(path.join(DitPaths::ASSETS_DIR))?;
+    std::fs::create_dir_all(path.join(DitPaths::FIG_DIR))?;
+
+    // Write .env with credentials (git-ignored).
+    let env_content = env_lines.join("\n") + "\n";
+    std::fs::write(path.join(".env"), &env_content)?;
+
+    // Add .dit/ and .env to .gitignore.
+    let gitignore_path = path.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let mut additions = String::new();
+    if !existing.contains(".dit/") {
+        additions.push_str(".dit/\n");
+    }
+    if !existing.contains(".env") {
+        additions.push_str(".env\n");
+    }
+    if !additions.is_empty() {
+        std::fs::write(&gitignore_path, format!("{existing}{additions}"))?;
+    }
+
+    sp.finish_with_message("DIT initialized");
+
+    // 6. Set up Playwright downloader (non-fatal).
+    let sp = spinner("Setting up downloader...");
+    match setup_downloader() {
+        Ok(_) => sp.finish_with_message("Downloader ready"),
+        Err(e) => {
+            sp.finish_with_message("Downloader setup skipped");
+            eprintln!("  {} Could not set up downloader: {e:#}", style("!").yellow().bold());
+            eprintln!("  Run {} to retry.", style("dit setup").cyan());
+        }
+    }
+
+    println!();
+    println!(
+        "  {} DIT repository initialized for {}",
+        style("✓").green().bold(),
+        style(&file_name).cyan()
+    );
+    println!(
+        "  Run {} to take your first snapshot.",
+        style("dit commit -m \"Initial snapshot\"").cyan()
+    );
+
+    Ok(())
+}
 
 fn cmd_init() -> Result<()> {
     let path = cwd()?;
@@ -263,6 +482,7 @@ fn cmd_init() -> Result<()> {
         name: file_name.clone(),
         figma_token: None,
         schema_version: 1,
+        ssh_key_path: None,
     };
     let config_json = serde_json::to_string_pretty(&config)?;
     std::fs::write(path.join(DitPaths::CONFIG_FILE), &config_json)?;
@@ -408,6 +628,13 @@ fn cmd_commit(message: &str, fig_path: Option<&Path>, local: bool) -> Result<()>
         let sp = spinner("Downloading .fig from Figma...");
         let hash = repo.commit_from_fig(&config.file_key, &auth, message, Some(&|msg: &str| {
             sp.set_message(msg.to_string());
+        }), Some(&|| {
+            sp.finish_and_clear();
+            let code: String = dialoguer::Input::new()
+                .with_prompt("Enter Figma 2FA code")
+                .interact_text()
+                .ok()?;
+            Some(code)
         }))?;
         sp.finish_with_message(format!(
             "Committed {}",
@@ -678,9 +905,10 @@ fn cmd_restore(commit: &str) -> Result<()> {
 fn cmd_push(remote: &str) -> Result<()> {
     let path = require_dit_repo()?;
     let status = git_ops::get_status(&path)?;
+    let ssh_key = read_config(&path).ok().and_then(|c| c.ssh_key_path);
 
     let sp = spinner(&format!("Pushing {} to {}...", &status.branch, remote));
-    git_ops::push(&path, remote, &status.branch)?;
+    git_ops::push(&path, remote, &status.branch, ssh_key.as_deref())?;
     sp.finish_with_message(format!(
         "Pushed {} to {}",
         style(&status.branch).cyan(),
@@ -693,9 +921,10 @@ fn cmd_push(remote: &str) -> Result<()> {
 fn cmd_pull(remote: &str) -> Result<()> {
     let path = require_dit_repo()?;
     let status = git_ops::get_status(&path)?;
+    let ssh_key = read_config(&path).ok().and_then(|c| c.ssh_key_path);
 
     let sp = spinner(&format!("Pulling {} from {}...", &status.branch, remote));
-    git_ops::pull(&path, remote, &status.branch)?;
+    git_ops::pull(&path, remote, &status.branch, ssh_key.as_deref())?;
     sp.finish_with_message(format!(
         "Pulled {} from {}",
         style(&status.branch).cyan(),

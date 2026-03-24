@@ -16,6 +16,7 @@ fn test_config() -> DitConfig {
         name: "Workflow Test Project".into(),
         figma_token: None,
         schema_version: 1,
+        ssh_key_path: None,
     }
 }
 

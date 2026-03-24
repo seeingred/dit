@@ -2,7 +2,7 @@
 //!
 //! All git interactions go through `git2` (libgit2) — no shelling out.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use git2::{
@@ -422,18 +422,108 @@ pub fn merge(repo_root: &Path, branch: &str) -> Result<MergeResult> {
     })
 }
 
+// ── SSH keys ─────────────────────────────────────────────────────────
+
+/// An SSH private key found in `~/.ssh/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKey {
+    /// Display name (filename without path).
+    pub name: String,
+    /// Full path to the private key file.
+    pub path: String,
+}
+
+/// List available SSH private keys from `~/.ssh/`.
+///
+/// Skips `.pub`, `.ppk`, `known_hosts*`, `config`, `authorized_keys`,
+/// and directories.
+pub fn list_ssh_keys() -> Vec<SshKey> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let ssh_dir = home.join(".ssh");
+    let Ok(entries) = std::fs::read_dir(&ssh_dir) else {
+        return Vec::new();
+    };
+
+    let skip = &["known_hosts", "config", "authorized_keys", "agent"];
+    let skip_ext = &["pub", "ppk", "bak", "old"];
+
+    let mut keys = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // Skip by extension
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if skip_ext.contains(&ext) {
+                continue;
+            }
+        }
+        // Skip by name prefix
+        if skip.iter().any(|s| name.starts_with(s)) {
+            continue;
+        }
+        keys.push(SshKey {
+            name,
+            path: path.display().to_string(),
+        });
+    }
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    keys
+}
+
+/// Check whether a URL looks like an SSH git URL (e.g. `git@github.com:...`).
+pub fn is_ssh_url(url: &str) -> bool {
+    url.starts_with("git@") || url.starts_with("ssh://")
+}
+
+// ── Clone ────────────────────────────────────────────────────────────
+
+/// Clone a git repository from `url` into `path`.
+///
+/// Shells out to `git clone` so that the user's configured credential helpers
+/// (SSH agent, macOS Keychain, credential.helper, etc.) work automatically.
+/// If `ssh_key_path` is provided, sets `GIT_SSH_COMMAND` so git uses that key.
+/// Returns the canonical path to the cloned directory.
+pub fn clone_repo(url: &str, path: &Path, ssh_key_path: Option<&str>) -> Result<PathBuf> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["clone", url]).arg(path);
+    if let Some(key) = ssh_key_path {
+        cmd.env("GIT_SSH_COMMAND", format!("ssh -i {} -o IdentitiesOnly=yes", key));
+    }
+    let output = cmd.output().context("failed to run `git clone`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to clone {url}: {stderr}");
+    }
+
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    Ok(canonical)
+}
+
 // ── Push / Pull ──────────────────────────────────────────────────────
 
 /// Push `branch` to `remote`.
 ///
 /// Shells out to `git push` so that the user's configured credential helpers
 /// (SSH agent, macOS Keychain, credential.helper, etc.) work automatically.
-pub fn push(repo_root: &Path, remote: &str, branch: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["push", remote, branch])
-        .current_dir(repo_root)
-        .output()
-        .context("failed to run `git push`")?;
+/// If `ssh_key_path` is provided, sets `GIT_SSH_COMMAND` so git uses that key.
+pub fn push(repo_root: &Path, remote: &str, branch: &str, ssh_key_path: Option<&str>) -> Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["push", remote, branch]).current_dir(repo_root);
+    if let Some(key) = ssh_key_path {
+        cmd.env("GIT_SSH_COMMAND", format!("ssh -i {} -o IdentitiesOnly=yes", key));
+    }
+    let output = cmd.output().context("failed to run `git push`")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -446,12 +536,14 @@ pub fn push(repo_root: &Path, remote: &str, branch: &str) -> Result<()> {
 ///
 /// Shells out to `git pull` so that the user's configured credential helpers
 /// (SSH agent, macOS Keychain, credential.helper, etc.) work automatically.
-pub fn pull(repo_root: &Path, remote: &str, branch: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["pull", remote, branch])
-        .current_dir(repo_root)
-        .output()
-        .context("failed to run `git pull`")?;
+/// If `ssh_key_path` is provided, sets `GIT_SSH_COMMAND` so git uses that key.
+pub fn pull(repo_root: &Path, remote: &str, branch: &str, ssh_key_path: Option<&str>) -> Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["pull", remote, branch]).current_dir(repo_root);
+    if let Some(key) = ssh_key_path {
+        cmd.env("GIT_SSH_COMMAND", format!("ssh -i {} -o IdentitiesOnly=yes", key));
+    }
+    let output = cmd.output().context("failed to run `git pull`")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

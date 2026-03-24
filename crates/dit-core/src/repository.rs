@@ -15,6 +15,18 @@ use crate::types::{
     DitBranch, DitCommitMeta, DitConfig, DitPaths, DitSnapshot, DitStatus,
 };
 
+/// Result of a clone operation.
+#[derive(Debug)]
+pub enum CloneResult {
+    /// The cloned repo is already a DIT repository — ready to use.
+    DitRepo(DitRepository),
+    /// The cloned repo is a plain git repo — needs DIT initialization.
+    NeedsInit {
+        /// Path to the cloned repository.
+        path: PathBuf,
+    },
+}
+
 /// Options for a commit operation.
 #[derive(Debug, Clone, Default)]
 pub struct CommitOptions {
@@ -39,6 +51,7 @@ pub struct RestoreResult {
 /// The main orchestrator for a DIT repository.
 ///
 /// Wraps a directory that is both a git repo and a DIT repo (has `.dit/`).
+#[derive(Debug)]
 pub struct DitRepository {
     root: PathBuf,
 }
@@ -59,9 +72,30 @@ impl DitRepository {
             .canonicalize()
             .unwrap_or_else(|_| dir.to_path_buf());
 
-        // Initialize git repo (also creates .dit/ and .gitignore)
-        git_ops::init_repository(&root)
-            .context("failed to initialize git repository")?;
+        // Initialize git repo if it doesn't already exist.
+        // If it's already a git repo (e.g. from `dit clone`), just set up .dit/.
+        if !git_ops::is_git_repo(&root) {
+            git_ops::init_repository(&root)
+                .context("failed to initialize git repository")?;
+        } else {
+            // Ensure .dit/ exists and .gitignore has the right entries.
+            let dit_dir = root.join(DitPaths::DIT_DIR);
+            std::fs::create_dir_all(&dit_dir)
+                .context("failed to create .dit directory")?;
+            let gitignore = root.join(".gitignore");
+            let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+            let mut additions = String::new();
+            if !existing.contains(".dit/") {
+                additions.push_str(".dit/\n");
+            }
+            if !existing.contains(".env") {
+                additions.push_str(".env\n");
+            }
+            if !additions.is_empty() {
+                std::fs::write(&gitignore, format!("{existing}{additions}"))
+                    .context("failed to update .gitignore")?;
+            }
+        }
 
         // Write DIT config
         let config_path = root.join(DitPaths::CONFIG_FILE);
@@ -79,6 +113,25 @@ impl DitRepository {
             .context("failed to create fig directory")?;
 
         Ok(Self { root })
+    }
+
+    /// Clone a git repository and detect whether it is a DIT repo.
+    ///
+    /// - If the cloned repo has `.dit/`, returns `CloneResult::DitRepo`.
+    /// - Otherwise returns `CloneResult::NeedsInit` so the caller can
+    ///   run the interactive init flow.
+    /// If `ssh_key_path` is provided, it is passed to `git clone` via
+    /// `GIT_SSH_COMMAND`.
+    pub fn clone(url: &str, dir: &Path, ssh_key_path: Option<&str>) -> Result<CloneResult> {
+        let repo_path = git_ops::clone_repo(url, dir, ssh_key_path)
+            .context("failed to clone repository")?;
+
+        if git_ops::is_dit_repo(&repo_path) {
+            let repo = Self { root: repo_path };
+            Ok(CloneResult::DitRepo(repo))
+        } else {
+            Ok(CloneResult::NeedsInit { path: repo_path })
+        }
     }
 
     /// Open an existing DIT repository at `dir`.
@@ -171,6 +224,7 @@ impl DitRepository {
         auth: &FigmaAuth,
         message: &str,
         on_progress: Option<&dyn Fn(&str)>,
+        on_2fa: Option<&dyn Fn() -> Option<String>>,
     ) -> Result<String> {
         let report = |msg: &str| {
             if let Some(cb) = on_progress {
@@ -187,7 +241,7 @@ impl DitRepository {
         let fig_tmp = self.root.join(DitPaths::DIT_DIR).join("tmp_download.fig");
         let preview_tmp = self.root.join(DitPaths::DIT_DIR).join("tmp_preview.png");
         report("Downloading .fig file from Figma...");
-        download_fig_file(file_key, &fig_tmp, auth, Some(&preview_tmp), on_progress)
+        download_fig_file(file_key, &fig_tmp, auth, Some(&preview_tmp), on_progress, on_2fa)
             .context("failed to download .fig file")?;
 
         // Convert .fig → DitSnapshot
@@ -409,14 +463,16 @@ impl DitRepository {
         git_ops::merge(&self.root, branch)
     }
 
-    /// Push a branch to a remote.
+    /// Push a branch to a remote. Uses SSH key from config if set.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
-        git_ops::push(&self.root, remote, branch)
+        let ssh_key = self.config().ok().and_then(|c| c.ssh_key_path);
+        git_ops::push(&self.root, remote, branch, ssh_key.as_deref())
     }
 
-    /// Pull (fetch + fast-forward) a branch from a remote.
+    /// Pull (fetch + fast-forward) a branch from a remote. Uses SSH key from config if set.
     pub fn pull(&self, remote: &str, branch: &str) -> Result<()> {
-        git_ops::pull(&self.root, remote, branch)
+        let ssh_key = self.config().ok().and_then(|c| c.ssh_key_path);
+        git_ops::pull(&self.root, remote, branch, ssh_key.as_deref())
     }
 }
 
@@ -432,6 +488,7 @@ mod tests {
             name: "Test Project".into(),
             figma_token: None,
             schema_version: 1,
+            ssh_key_path: None,
         }
     }
 

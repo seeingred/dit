@@ -104,19 +104,60 @@ try {
     await page.getByRole("button", { name: "log in" }).click();
   }
 
-  // Wait for auth to complete
+  // Wait for auth to complete — or handle 2FA if it appears
   console.log("[DIT] Waiting for authentication...");
-  await page.waitForSelector('[data-testid="ProfileButton"]', {
-    timeout: 30_000,
-  });
+  const authIndicator = page.getByRole("button", { name: "Open account dropdown" })
+    .or(page.getByRole("navigation", { name: "Sidebar" }))
+    .first();
+  // 2FA input can be on the page directly (/login flow) or inside an iframe (popup flow)
+  const twoFaDirectInput = page.getByRole("textbox", { name: "Authentication code" });
+  const twoFaIframeInput = page.frameLocator('iframe').getByRole("textbox", { name: "Authentication code" });
+
+  // Race: either we land on the dashboard or hit a 2FA prompt
+  const which = await Promise.race([
+    authIndicator.waitFor({ timeout: 30_000 }).then(() => "auth_ok"),
+    twoFaDirectInput.waitFor({ timeout: 30_000 }).then(() => "2fa_direct"),
+    twoFaIframeInput.waitFor({ timeout: 30_000 }).then(() => "2fa_iframe"),
+  ]);
+
+  if (which === "2fa_direct" || which === "2fa_iframe") {
+    const twoFaInput = which === "2fa_direct" ? twoFaDirectInput : twoFaIframeInput;
+    const twoFaSubmit = which === "2fa_direct"
+      ? page.getByRole("button", { name: "Log in" })
+      : page.frameLocator('iframe').getByRole("button", { name: "Log in" });
+
+    // Signal the parent process that we need a 2FA code
+    console.log("[DIT:2FA_REQUIRED]");
+
+    // Read the code from stdin
+    const code = await new Promise((resolve) => {
+      let data = "";
+      process.stdin.setEncoding("utf-8");
+      process.stdin.on("data", (chunk) => {
+        data += chunk;
+        if (data.includes("\n")) {
+          process.stdin.destroy();
+          resolve(data.trim());
+        }
+      });
+      process.stdin.resume();
+    });
+
+    console.log("[DIT] Entering 2FA code...");
+    await twoFaInput.fill(code);
+    await twoFaSubmit.click();
+
+    // Wait for auth to complete after 2FA
+    await authIndicator.waitFor({ timeout: 30_000 });
+  }
 
   // ── Navigate to file and trigger download ─────────────────────────
   console.log("[DIT] Navigating to design file...");
   await page.goto(`https://www.figma.com/design/${fileKey}/`);
 
-  // Wait for the editor to load
+  // Wait for the editor to load — look for the "Main menu" button
   console.log("[DIT] Waiting for editor to load...");
-  await page.waitForSelector("#toggle-menu-button", { timeout: 60_000 });
+  await page.getByRole("button", { name: "Main menu" }).waitFor({ timeout: 60_000 });
 
   // Capture preview screenshot if requested
   if (args["preview-output"]) {
@@ -130,11 +171,13 @@ try {
   console.log("[DIT] Opening file menu...");
   const downloadPromise = page.waitForEvent("download", { timeout: 180_000 });
 
-  await page.locator("#toggle-menu-button").click();
-  await page.locator("[id^='mainMenu-file-menu-']").click();
+  // Main menu → File → Save local copy
+  // Menu items have invisible zero-width spaces and ellipsis, so use regex
+  await page.getByRole("button", { name: "Main menu" }).click();
+  await page.getByRole("menuitemcheckbox", { name: /File/ }).click();
 
   console.log("[DIT] Initiating download...");
-  await page.locator("[id^='mainMenu-save-as-']").click();
+  await page.getByRole("menuitemcheckbox", { name: /Save local copy/ }).click();
 
   console.log("[DIT] Waiting for download to complete...");
   const download = await downloadPromise;

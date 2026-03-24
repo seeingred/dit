@@ -17,6 +17,10 @@ pub struct DitConfig {
     pub figma_token: Option<String>,
     /// Schema version for forward-compatibility.
     pub schema_version: u32,
+    /// SSH private key path for remote operations (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub ssh_key_path: Option<String>,
 }
 
 // ─── DitCommitMeta ───────────────────────────────────────────────────────────

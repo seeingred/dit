@@ -102,7 +102,7 @@ fn do_commit(repo: &DitRepository, file_key: &str, message: &str, mode: &CommitM
             .commit_from_local_fig(fig_path, file_key, message)
             .expect("commit_from_local_fig failed"),
         CommitMode::Download { auth } => repo
-            .commit_from_fig(file_key, auth, message, None)
+            .commit_from_fig(file_key, auth, message, None, None)
             .expect("commit_from_fig failed"),
     }
 }
@@ -125,6 +125,7 @@ fn setup() -> (TempDir, DitRepository, String, CommitMode) {
         name: "E2E Test Project".into(),
         figma_token: None,
         schema_version: 1,
+        ssh_key_path: None,
     };
     let repo = DitRepository::init(tmp.path(), config).expect("failed to init repo");
 

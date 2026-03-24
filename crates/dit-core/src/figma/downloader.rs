@@ -182,12 +182,17 @@ pub fn setup_downloader() -> Result<PathBuf> {
 /// If `on_progress` is provided, it will be called with each progress
 /// message from the download script (e.g. "Launching browser...").
 /// Otherwise, progress is logged via `tracing::info!`.
+///
+/// If `on_2fa` is provided and the Figma login requires two-factor
+/// authentication, it will be called to obtain the 2FA code from the user.
+/// If `on_2fa` is None and 2FA is required, the download will fail.
 pub fn download_fig_file(
     file_key: &str,
     output_path: &Path,
     auth: &FigmaAuth,
     preview_output_path: Option<&Path>,
     on_progress: Option<&dyn Fn(&str)>,
+    on_2fa: Option<&dyn Fn() -> Option<String>>,
 ) -> Result<()> {
     let script_path = ensure_downloader_dir()
         .context("failed to set up downloader scripts")?;
@@ -201,7 +206,8 @@ pub fn download_fig_file(
         .arg("--output")
         .arg(output_path)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped());
 
     if let Some(preview_path) = preview_output_path {
         cmd.arg("--preview-output").arg(preview_path);
@@ -220,6 +226,9 @@ pub fn download_fig_file(
         .spawn()
         .context("failed to execute download-fig.mjs — is Node.js installed?")?;
 
+    // Take ownership of stdin so we can write to it if 2FA is needed.
+    let mut child_stdin = child.stdin.take();
+
     // Read stderr in a background thread to prevent pipe buffer deadlocks.
     let stderr_handle = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
@@ -231,13 +240,34 @@ pub fn download_fig_file(
         })
     });
 
-    // Read stdout lines in real-time, forwarding [DIT] progress messages.
+    // Read stdout lines in real-time, forwarding [DIT] progress messages
+    // and handling 2FA requests.
     if let Some(stdout) = child.stdout.take() {
-        use std::io::BufRead;
+        use std::io::{BufRead, Write};
         let reader = std::io::BufReader::new(stdout);
         for line in reader.lines() {
             if let Ok(line) = line {
-                if let Some(msg) = line.strip_prefix("[DIT] ") {
+                if line == "[DIT:2FA_REQUIRED]" {
+                    // 2FA code requested by the script
+                    if let Some(ref cb) = on_2fa {
+                        if let Some(code) = cb() {
+                            if let Some(ref mut stdin) = child_stdin {
+                                writeln!(stdin, "{}", code).ok();
+                                stdin.flush().ok();
+                            }
+                        } else {
+                            // User cancelled 2FA
+                            if let Some(ref mut stdin) = child_stdin {
+                                writeln!(stdin, "").ok();
+                                stdin.flush().ok();
+                            }
+                        }
+                    } else {
+                        bail!("Figma requires two-factor authentication but no 2FA handler is available");
+                    }
+                    // Drop stdin so the child process can exit cleanly
+                    child_stdin = None;
+                } else if let Some(msg) = line.strip_prefix("[DIT] ") {
                     if let Some(cb) = on_progress {
                         cb(msg);
                     } else {

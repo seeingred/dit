@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { CommitInfo, RepoStatus, RestoreInfo } from "../types";
-import { restoreCommit, openFigFile } from "../commands";
+import { restoreCommit, openFigFile, submit2faCode } from "../commands";
 import { CommitList } from "./CommitList";
 import { CommitOverlay } from "./CommitOverlay";
 import { PreviewPanel } from "./PreviewPanel";
@@ -37,25 +37,31 @@ export function MainLayout({
   const [isCommitting, setIsCommitting] = useState(false);
   const [commitSteps, setCommitSteps] = useState<string[]>([]);
   const [commitComplete, setCommitComplete] = useState(false);
+  const [needs2fa, setNeeds2fa] = useState(false);
 
   const selectedCommit = commits.find((c) => c.hash === selectedHash) ?? null;
   const diffCommitA = commits.find((c) => c.hash === diffSelection[0]) ?? null;
   const diffCommitB = commits.find((c) => c.hash === diffSelection[1]) ?? null;
 
-  // Listen for commit-progress events from backend
+  // Listen for commit-progress and 2FA events from backend
   useEffect(() => {
-    const unlisten = listen<string>("commit-progress", (event) => {
+    const unlistenProgress = listen<string>("commit-progress", (event) => {
       setCommitSteps((prev) => {
         if (prev.includes(event.payload)) return prev;
         return [...prev, event.payload];
       });
       if (event.payload === "Commit complete!") {
         setCommitComplete(true);
+        setNeeds2fa(false);
       }
+    });
+    const unlisten2fa = listen("2fa-required", () => {
+      setNeeds2fa(true);
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenProgress.then((fn) => fn());
+      unlisten2fa.then((fn) => fn());
     };
   }, []);
 
@@ -63,6 +69,7 @@ export function MainLayout({
     setIsCommitting(true);
     setCommitSteps([]);
     setCommitComplete(false);
+    setNeeds2fa(false);
   }, []);
 
   const handleCommitEnd = useCallback((success: boolean) => {
@@ -186,7 +193,15 @@ export function MainLayout({
 
       {/* Commit overlay */}
       {isCommitting && (
-        <CommitOverlay steps={commitSteps} isComplete={commitComplete} />
+        <CommitOverlay
+          steps={commitSteps}
+          isComplete={commitComplete}
+          needs2fa={needs2fa}
+          onSubmit2fa={(code) => {
+            setNeeds2fa(false);
+            submit2faCode(code);
+          }}
+        />
       )}
 
       {/* Restore result dialog */}

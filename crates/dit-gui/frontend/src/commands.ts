@@ -1,8 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CommitInfo, RepoStatus, DiffResult, BranchInfo, RestoreInfo, DirCheck, TreeNode, DiffTreeResult } from "./types";
+import type { CommitInfo, RepoStatus, DiffResult, BranchInfo, RestoreInfo, DirCheck, CloneInfo, SshKeyInfo, TreeNode, DiffTreeResult } from "./types";
 
 export async function checkDirectory(path: string): Promise<DirCheck> {
   return invoke("check_directory", { path });
+}
+
+export async function listSshKeys(): Promise<SshKeyInfo[]> {
+  return invoke("list_ssh_keys");
+}
+
+export async function cloneRepo(url: string, path: string, sshKeyPath?: string | null): Promise<CloneInfo> {
+  return invoke("clone_repo", { url, path, sshKeyPath: sshKeyPath ?? null });
 }
 
 export async function initRepo(
@@ -13,8 +21,9 @@ export async function initRepo(
   fileKey: string,
   fileName: string,
   force: boolean = false,
+  sshKeyPath: string | null = null,
 ): Promise<string> {
-  return invoke("init_repo", { path, authCookie, authEmail, authPassword, fileKey, fileName, force });
+  return invoke("init_repo", { path, authCookie, authEmail, authPassword, fileKey, fileName, force, sshKeyPath });
 }
 
 export async function openRepo(path: string): Promise<string> {
@@ -35,6 +44,10 @@ export async function getBranches(): Promise<BranchInfo[]> {
 
 export async function commitChanges(message: string): Promise<CommitInfo> {
   return invoke("commit", { message });
+}
+
+export async function submit2faCode(code: string): Promise<void> {
+  return invoke("submit_2fa_code", { code });
 }
 
 export async function restoreCommit(hash: string): Promise<RestoreInfo> {

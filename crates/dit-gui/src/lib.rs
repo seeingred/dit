@@ -8,13 +8,16 @@ use tauri::{Emitter, State};
 
 use dit_core::canonical;
 use dit_core::figma::FigmaAuth;
-use dit_core::repository::DitRepository;
+use dit_core::git_ops;
+use dit_core::repository::{CloneResult, DitRepository};
 use dit_core::types::{DitConfig, DitNode, DitPage, DitPaths, node_id_to_filename};
 
 // ── Tauri managed state ──────────────────────────────────────────────
 
 struct AppState {
     repo: Mutex<Option<DitRepository>>,
+    /// Channel for receiving 2FA codes from the frontend.
+    twofa_sender: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
 // ── Shared response types ────────────────────────────────────────────
@@ -61,6 +64,16 @@ pub struct DiffResult {
 pub struct RestoreInfo {
     pub message: String,
     pub fig_file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneInfo {
+    /// Whether the cloned repo is already a DIT repository.
+    pub is_dit_repo: bool,
+    /// Canonical path to the cloned directory.
+    pub path: String,
+    /// Project name if it's a DIT repo, None otherwise.
+    pub name: Option<String>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -115,6 +128,68 @@ async fn check_directory(path: String) -> Result<DirCheck, String> {
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKeyInfo {
+    pub name: String,
+    pub path: String,
+}
+
+#[tauri::command]
+async fn list_ssh_keys() -> Vec<SshKeyInfo> {
+    git_ops::list_ssh_keys()
+        .into_iter()
+        .map(|k| SshKeyInfo { name: k.name, path: k.path })
+        .collect()
+}
+
+#[tauri::command]
+async fn clone_repo(
+    state: State<'_, AppState>,
+    url: String,
+    path: String,
+    ssh_key_path: Option<String>,
+) -> Result<CloneInfo, String> {
+    let dir = PathBuf::from(&path);
+
+    let result = DitRepository::clone(&url, &dir, ssh_key_path.as_deref())
+        .map_err(|e| format!("{e:#}"))?;
+
+    match result {
+        CloneResult::DitRepo(repo) => {
+            // Store SSH key in config if one was selected.
+            if let Some(ref key) = ssh_key_path {
+                if let Ok(mut config) = repo.config() {
+                    config.ssh_key_path = Some(key.clone());
+                    if let Ok(json) = serde_json::to_string_pretty(&config) {
+                        let _ = std::fs::write(
+                            repo.root().join(DitPaths::CONFIG_FILE),
+                            &json,
+                        );
+                    }
+                }
+            }
+            let name = repo.config().map(|c| c.name).ok();
+            let repo_path = repo.root().display().to_string();
+
+            let mut guard = state.repo.lock().map_err(|e| format!("lock error: {e}"))?;
+            *guard = Some(repo);
+
+            Ok(CloneInfo {
+                is_dit_repo: true,
+                path: repo_path,
+                name,
+            })
+        }
+        CloneResult::NeedsInit { path } => {
+            Ok(CloneInfo {
+                is_dit_repo: false,
+                path: path.display().to_string(),
+                name: None,
+            })
+        }
+    }
+}
+
 #[tauri::command]
 async fn init_repo(
     state: State<'_, AppState>,
@@ -125,20 +200,16 @@ async fn init_repo(
     file_key: String,
     file_name: String,
     force: bool,
+    ssh_key_path: Option<String>,
 ) -> Result<String, String> {
     let dir = PathBuf::from(&path);
 
-    // If force-reinitializing, clean existing DIT/git data.
+    // If force-reinitializing, clean existing DIT data only (preserve git).
     if force {
         let dit_dir = dir.join(".dit");
         if dit_dir.exists() {
             std::fs::remove_dir_all(&dit_dir)
                 .map_err(|e| format!("failed to remove .dit: {e}"))?;
-        }
-        let git_dir = dir.join(".git");
-        if git_dir.exists() {
-            std::fs::remove_dir_all(&git_dir)
-                .map_err(|e| format!("failed to remove .git: {e}"))?;
         }
     }
 
@@ -147,6 +218,7 @@ async fn init_repo(
         name: file_name,
         figma_token: None,
         schema_version: 1,
+        ssh_key_path,
     };
 
     let repo = DitRepository::init(&dir, config).map_err(|e| format!("{e:#}"))?;
@@ -257,6 +329,15 @@ async fn get_branches(state: State<'_, AppState>) -> Result<Vec<BranchInfo>, Str
 }
 
 #[tauri::command]
+async fn submit_2fa_code(state: State<'_, AppState>, code: String) -> Result<(), String> {
+    let guard = state.twofa_sender.lock().map_err(|e| format!("lock error: {e}"))?;
+    if let Some(sender) = guard.as_ref() {
+        sender.send(code).map_err(|e| format!("failed to send 2FA code: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn commit(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -286,16 +367,35 @@ async fn commit(
 
     app.emit("commit-progress", "Downloading design from Figma...").ok();
 
+    // Set up 2FA channel
+    let (twofa_tx, twofa_rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut guard = state.twofa_sender.lock().map_err(|e| format!("lock error: {e}"))?;
+        *guard = Some(twofa_tx);
+    }
+
     // Download .fig and commit using the new flow.
     let app_handle = app.clone();
+    let app_handle_2fa = app.clone();
     let hash = {
         let guard = state.repo.lock().map_err(|e| format!("lock error: {e}"))?;
         let repo = guard.as_ref().ok_or("No repository open.")?;
         repo.commit_from_fig(&config.file_key, &auth, &message, Some(&|msg: &str| {
             app_handle.emit("commit-progress", msg).ok();
+        }), Some(&|| {
+            // Emit event to frontend requesting 2FA code
+            app_handle_2fa.emit("2fa-required", ()).ok();
+            // Block until the frontend sends the code via submit_2fa_code
+            twofa_rx.recv().ok()
         }))
             .map_err(|e| format!("{e:#}"))?
     };
+
+    // Clean up 2FA channel
+    {
+        let mut guard = state.twofa_sender.lock().map_err(|e| format!("lock error: {e}"))?;
+        *guard = None;
+    }
 
     app.emit("commit-progress", "Finalizing...").ok();
 
@@ -675,15 +775,19 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             repo: Mutex::new(None),
+            twofa_sender: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             check_directory,
+            list_ssh_keys,
+            clone_repo,
             init_repo,
             open_repo,
             get_status,
             get_log,
             get_branches,
             commit,
+            submit_2fa_code,
             restore,
             open_fig_file,
             checkout,
