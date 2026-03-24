@@ -316,8 +316,15 @@ async fn init_repo(
     Ok(format!("Initialized DIT repository at {display}"))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenRepoInfo {
+    pub name: String,
+    pub needs_auth: bool,
+}
+
 #[tauri::command]
-async fn open_repo(state: State<'_, AppState>, path: String) -> Result<String, String> {
+
+async fn open_repo(state: State<'_, AppState>, path: String) -> Result<OpenRepoInfo, String> {
     let dir = PathBuf::from(&path);
 
     let repo = DitRepository::open(&dir).map_err(|e| format!("{e:#}"))?;
@@ -325,11 +332,12 @@ async fn open_repo(state: State<'_, AppState>, path: String) -> Result<String, S
         .config()
         .map(|c| c.name)
         .unwrap_or_else(|_| "Unknown".into());
+    let needs_auth = !repo.root().join(".env").exists();
 
     let mut guard = state.repo.lock().map_err(|e| format!("lock error: {e}"))?;
     *guard = Some(repo);
 
-    Ok(format!("Opened: {name}"))
+    Ok(OpenRepoInfo { name, needs_auth })
 }
 
 #[tauri::command]

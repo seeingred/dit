@@ -34,7 +34,7 @@ export async function initRepo(
   return invoke("init_repo", { path, authCookie, authEmail, authPassword, fileKey, fileName, force, sshKeyPath });
 }
 
-export async function openRepo(path: string): Promise<string> {
+export async function openRepo(path: string): Promise<{ name: string; needs_auth: boolean }> {
   return invoke("open_repo", { path });
 }
 

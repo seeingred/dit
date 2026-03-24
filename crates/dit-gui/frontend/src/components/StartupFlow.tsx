@@ -83,8 +83,12 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
     setLoading(true);
     setError(null);
     try {
-      await openRepo(folderPath);
-      onRepoOpened(folderPath);
+      const result = await openRepo(folderPath);
+      if (result.needs_auth) {
+        setStep("figma-auth-only");
+      } else {
+        onRepoOpened(folderPath);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
