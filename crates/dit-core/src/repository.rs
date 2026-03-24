@@ -311,10 +311,14 @@ impl DitRepository {
         self.store_fig_snapshot(&hash, &fig_tmp)
             .context("failed to store .fig snapshot")?;
 
-        // Store named preview copy (dit.previews/<hash>.png)
-        if preview_tmp.exists() {
-            self.store_preview(&hash, &preview_tmp)
+        // Store named preview copy (dit.previews/<hash>.png) from the pre-staged latest.png
+        let latest_preview = self.root.join(DitPaths::PREVIEWS_DIR).join("latest.png");
+        if latest_preview.exists() {
+            self.store_preview(&hash, &latest_preview)
                 .context("failed to store preview image")?;
+        }
+        // Clean up temp preview
+        if preview_tmp.exists() {
             std::fs::remove_file(&preview_tmp).ok();
         }
 
