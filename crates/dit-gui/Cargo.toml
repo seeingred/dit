@@ -21,6 +21,7 @@ tracing.workspace = true
 dotenvy = "0.15"
 base64 = "0.22"
 git2.workspace = true
+openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [lib]
 name = "dit_gui"
