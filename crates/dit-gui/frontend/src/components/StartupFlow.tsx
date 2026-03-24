@@ -5,6 +5,7 @@ import {
   checkDirectory,
   cloneRepo,
   listSshKeys,
+  saveCredentials,
 } from "../commands";
 import type { SshKeyInfo } from "../types";
 
@@ -12,7 +13,7 @@ interface StartupFlowProps {
   onRepoOpened: (path: string) => void;
 }
 
-type Step = "pick-folder" | "clone" | "cloning" | "figma-auth" | "figma-file" | "creating";
+type Step = "pick-folder" | "clone" | "cloning" | "figma-auth" | "figma-auth-only" | "figma-file" | "creating";
 type AuthMethod = "cookie" | "email";
 
 /** Extract a Figma file key from any Figma URL or raw key. */
@@ -118,11 +119,15 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
     try {
       const sshKey = isCloneSsh ? selectedSshKey : null;
       const result = await cloneRepo(cloneUrl, clonePath, sshKey);
-      if (result.is_dit_repo) {
-        // Already a DIT repo — open it directly
+      if (result.is_dit_repo && !result.needs_auth) {
+        // DIT repo with credentials — open directly
         onRepoOpened(result.path);
+      } else if (result.is_dit_repo && result.needs_auth) {
+        // DIT repo but missing credentials — ask for auth only
+        setFolderPath(result.path);
+        setStep("figma-auth-only");
       } else {
-        // Plain git repo — need to initialize DIT
+        // Plain git repo — need full DIT initialization
         setFolderPath(result.path);
         setStep("figma-auth");
       }
@@ -491,6 +496,117 @@ export function StartupFlow({ onRepoOpened }: StartupFlowProps) {
                            disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Next
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step: Figma Auth Only (cloned DIT repo, just needs credentials) */}
+        {step === "figma-auth-only" && (
+          <div className="space-y-4">
+            <div className="px-4 py-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+              <p className="text-green-400 text-sm font-medium">Repository cloned successfully</p>
+              <p className="text-dit-text-muted text-xs mt-1">Set up Figma credentials to enable commits.</p>
+            </div>
+            <div>
+              <label className="block text-dit-text text-sm font-medium mb-3">
+                Figma Authentication
+              </label>
+              <div className="flex gap-2 mb-4">
+                <button
+                  onClick={() => setAuthMethod("cookie")}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                    authMethod === "cookie"
+                      ? "bg-dit-accent/10 border-dit-accent text-dit-accent"
+                      : "bg-dit-surface border-dit-border text-dit-text-muted hover:text-dit-text"
+                  }`}
+                >
+                  Browser Cookie
+                </button>
+                <button
+                  onClick={() => setAuthMethod("email")}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                    authMethod === "email"
+                      ? "bg-dit-accent/10 border-dit-accent text-dit-accent"
+                      : "bg-dit-surface border-dit-border text-dit-text-muted hover:text-dit-text"
+                  }`}
+                >
+                  Email + Password
+                </button>
+              </div>
+              {authMethod === "cookie" ? (
+                <div>
+                  <input
+                    type="password"
+                    value={authCookie}
+                    onChange={(e) => setAuthCookie(e.target.value)}
+                    placeholder="Paste your Figma auth cookie..."
+                    className="w-full bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                               text-dit-text placeholder:text-dit-text-muted text-sm
+                               focus:outline-none focus:border-dit-accent transition-colors"
+                  />
+                  <p className="text-dit-text-muted text-xs mt-2">
+                    Copy from your browser's cookies for figma.com (cookie name: __Host-figma.authn)
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="Figma email address"
+                    className="w-full bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                               text-dit-text placeholder:text-dit-text-muted text-sm
+                               focus:outline-none focus:border-dit-accent transition-colors"
+                  />
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="Figma password"
+                    className="w-full bg-dit-surface border border-dit-border rounded-lg px-4 py-3
+                               text-dit-text placeholder:text-dit-text-muted text-sm
+                               focus:outline-none focus:border-dit-accent transition-colors"
+                  />
+                </div>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  // Skip auth — open without credentials (restore-only mode)
+                  onRepoOpened(folderPath);
+                }}
+                className="px-4 py-3 bg-dit-surface border border-dit-border rounded-lg
+                           text-dit-text-muted hover:text-dit-text transition-colors text-sm"
+              >
+                Skip
+              </button>
+              <button
+                onClick={async () => {
+                  if (!hasValidAuth) return;
+                  setLoading(true);
+                  setError(null);
+                  try {
+                    await saveCredentials(
+                      authMethod === "cookie" ? authCookie : null,
+                      authMethod === "email" ? authEmail : null,
+                      authMethod === "email" ? authPassword : null,
+                    );
+                    onRepoOpened(folderPath);
+                  } catch (e) {
+                    setError(String(e));
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                disabled={!hasValidAuth || loading}
+                className="flex-1 px-4 py-3 bg-dit-accent text-white rounded-lg font-medium
+                           hover:bg-dit-accent-hover transition-colors text-sm
+                           disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Save & Open
               </button>
             </div>
           </div>

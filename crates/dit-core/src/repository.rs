@@ -466,9 +466,22 @@ impl DitRepository {
         git_ops::checkout(&self.root, commit_hash)
             .with_context(|| format!("failed to checkout commit {commit_hash}"))?;
 
-        // Read snapshot and find .fig file while at the target commit
+        // Read snapshot and copy .fig to a stable location while at the target commit.
+        // We must copy now because `dit.fig/latest.fig` will change when we
+        // check out back to the original branch.
         let snapshot = canonical::read_snapshot(&self.root);
-        let fig_file_path = self.get_fig_file_path(commit_hash);
+        let fig_file_path = if let Some(src) = self.get_fig_file_path(commit_hash) {
+            // Copy to .dit/fig_snapshots/<hash>.fig so it persists after checkout
+            let snapshots_dir = self.root.join(DitPaths::FIG_SNAPSHOTS_DIR);
+            std::fs::create_dir_all(&snapshots_dir).ok();
+            let stable = snapshots_dir.join(format!("{commit_hash}.fig"));
+            if !stable.exists() {
+                std::fs::copy(&src, &stable).ok();
+            }
+            Some(stable)
+        } else {
+            None
+        };
 
         // Always return to original branch, even if read failed
         let checkout_result = git_ops::checkout(&self.root, &original_branch);

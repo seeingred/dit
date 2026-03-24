@@ -57,6 +57,7 @@ export interface CloneInfo {
   is_dit_repo: boolean;
   path: string;
   name: string | null;
+  needs_auth: boolean;
 }
 
 export interface SshKeyInfo {

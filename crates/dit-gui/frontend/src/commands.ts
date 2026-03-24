@@ -13,6 +13,14 @@ export async function cloneRepo(url: string, path: string, sshKeyPath?: string |
   return invoke("clone_repo", { url, path, sshKeyPath: sshKeyPath ?? null });
 }
 
+export async function saveCredentials(
+  authCookie: string | null,
+  authEmail: string | null,
+  authPassword: string | null,
+): Promise<void> {
+  return invoke("save_credentials", { authCookie, authEmail, authPassword });
+}
+
 export async function initRepo(
   path: string,
   authCookie: string | null,

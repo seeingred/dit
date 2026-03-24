@@ -74,6 +74,8 @@ pub struct CloneInfo {
     pub path: String,
     /// Project name if it's a DIT repo, None otherwise.
     pub name: Option<String>,
+    /// Whether Figma credentials are missing (needs auth setup).
+    pub needs_auth: bool,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -170,6 +172,7 @@ async fn clone_repo(
             }
             let name = repo.config().map(|c| c.name).ok();
             let repo_path = repo.root().display().to_string();
+            let needs_auth = !repo.root().join(".env").exists();
 
             let mut guard = state.repo.lock().map_err(|e| format!("lock error: {e}"))?;
             *guard = Some(repo);
@@ -178,6 +181,7 @@ async fn clone_repo(
                 is_dit_repo: true,
                 path: repo_path,
                 name,
+                needs_auth,
             })
         }
         CloneResult::NeedsInit { path } => {
@@ -185,9 +189,58 @@ async fn clone_repo(
                 is_dit_repo: false,
                 path: path.display().to_string(),
                 name: None,
+                needs_auth: true,
             })
         }
     }
+}
+
+#[tauri::command]
+async fn save_credentials(
+    state: State<'_, AppState>,
+    auth_cookie: Option<String>,
+    auth_email: Option<String>,
+    auth_password: Option<String>,
+) -> Result<(), String> {
+    let guard = state.repo.lock().map_err(|e| format!("lock error: {e}"))?;
+    let repo = guard
+        .as_ref()
+        .ok_or_else(|| "No repository open.".to_string())?;
+
+    let mut env_lines = Vec::new();
+    if let Some(cookie) = &auth_cookie {
+        if !cookie.is_empty() {
+            env_lines.push(format!("FIGMA_AUTH_COOKIE={cookie}"));
+        }
+    }
+    if let Some(email) = &auth_email {
+        if !email.is_empty() {
+            env_lines.push(format!("FIGMA_EMAIL={email}"));
+        }
+    }
+    if let Some(password) = &auth_password {
+        if !password.is_empty() {
+            env_lines.push(format!("FIGMA_PASSWORD={password}"));
+        }
+    }
+
+    if env_lines.is_empty() {
+        return Err("No credentials provided.".into());
+    }
+
+    let env_path = repo.root().join(".env");
+    std::fs::write(&env_path, env_lines.join("\n") + "\n")
+        .map_err(|e| format!("failed to write .env: {e}"))?;
+
+    // Ensure .env is in .gitignore
+    let gitignore_path = repo.root().join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    if !existing.contains(".env") {
+        std::fs::write(&gitignore_path, format!("{existing}.env\n"))
+            .map_err(|e| format!("failed to update .gitignore: {e}"))?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -809,6 +862,7 @@ pub fn run() {
             check_directory,
             list_ssh_keys,
             clone_repo,
+            save_credentials,
             init_repo,
             open_repo,
             get_status,
