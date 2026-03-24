@@ -63,6 +63,7 @@ export default function App() {
       status={status}
       onBranchChange={handleBranchChange}
       onRefresh={loadRepoData}
+      onCloseRepo={() => setView("startup")}
     />
   );
 }

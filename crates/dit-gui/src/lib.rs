@@ -521,21 +521,32 @@ async fn get_preview_image(
 ) -> Result<Option<String>, String> {
     with_repo(&state, |repo| {
         // Try to find a preview image for this commit.
-        // Convention: dit.previews/<hash>.png (git-tracked)
         let short = &commit_hash[..7.min(commit_hash.len())];
         let preview_dir = repo.root().join(DitPaths::PREVIEWS_DIR);
-        let preview_path = preview_dir.join(format!("{short}.png"));
 
-        // Fall back to legacy .dit/previews/ location
-        let legacy_path = repo.root()
+        // 1. Named copy: dit.previews/<hash>.png
+        let named = preview_dir.join(format!("{short}.png"));
+        // 2. Latest: dit.previews/latest.png (most recent commit)
+        let latest = preview_dir.join("latest.png");
+        // 3. Legacy: .dit/previews/<hash>.png
+        let legacy = repo.root()
             .join(DitPaths::DIT_DIR)
             .join("previews")
             .join(format!("{short}.png"));
 
-        let path = if preview_path.exists() {
-            Some(preview_path)
-        } else if legacy_path.exists() {
-            Some(legacy_path)
+        // Check if this commit is HEAD (latest.png is valid for HEAD)
+        let head_hash = repo.status().ok().and_then(|s| s.head);
+        let is_head = head_hash
+            .as_ref()
+            .map(|h| h.starts_with(short))
+            .unwrap_or(false);
+
+        let path = if named.exists() {
+            Some(named)
+        } else if is_head && latest.exists() {
+            Some(latest)
+        } else if legacy.exists() {
+            Some(legacy)
         } else {
             None
         };

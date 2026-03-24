@@ -18,6 +18,7 @@ interface MainLayoutProps {
   status: RepoStatus;
   onBranchChange: (branch: string) => void;
   onRefresh: () => Promise<void>;
+  onCloseRepo: () => void;
 }
 
 export function MainLayout({
@@ -28,6 +29,7 @@ export function MainLayout({
   status,
   onBranchChange,
   onRefresh,
+  onCloseRepo,
 }: MainLayoutProps) {
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
   const [diffSelection, setDiffSelection] = useState<[string | null, string | null]>([null, null]);
@@ -124,11 +126,13 @@ export function MainLayout({
           />
         </div>
         <div className="flex items-center gap-3">
-          {status.has_changes && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-dit-warning/10 text-dit-warning">
-              Unsaved changes
-            </span>
-          )}
+          <button
+            onClick={onCloseRepo}
+            className="text-xs text-dit-text-muted hover:text-dit-text transition-colors"
+            title="Close repository"
+          >
+            Close
+          </button>
           <span className="text-xs text-dit-text-muted font-mono truncate max-w-[300px]">
             {repoPath}
           </span>

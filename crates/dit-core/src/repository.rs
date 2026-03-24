@@ -418,18 +418,26 @@ impl DitRepository {
     /// Get the path to the .fig file for a given commit, if it exists.
     ///
     /// Checks in order:
-    /// 1. `dit.fig/<hash>.fig` — git-tracked, named by commit hash
-    /// 2. `.dit/fig_snapshots/<hash>.fig` — legacy local-only storage
-    /// 3. `dit.fig/latest.fig` — the most recently committed .fig (matches current HEAD)
+    /// 1. `.dit/fig_snapshots/<hash>.fig` — local cache (git-ignored)
+    /// 2. `dit.fig/<hash>.fig` — git-tracked named copy
+    /// 3. `dit.fig/latest.fig` — current working tree's .fig (only valid
+    ///    when the working tree is checked out at the target commit)
     pub fn get_fig_file_path(&self, commit_hash: &str) -> Option<PathBuf> {
-        // Fast local cache (.dit/fig_snapshots/<hash>.fig, git-ignored)
+        // Local cache (.dit/fig_snapshots/<hash>.fig, git-ignored)
         let cached = self.root
             .join(DitPaths::FIG_SNAPSHOTS_DIR)
             .join(format!("{commit_hash}.fig"));
         if cached.exists() {
             return Some(cached);
         }
-        // Git-tracked latest (dit.fig/latest.fig — current HEAD's .fig)
+        // Git-tracked named copy (dit.fig/<hash>.fig)
+        let named = self.root
+            .join(DitPaths::FIG_DIR)
+            .join(format!("{commit_hash}.fig"));
+        if named.exists() {
+            return Some(named);
+        }
+        // Git-tracked latest (dit.fig/latest.fig)
         let latest = self.root
             .join(DitPaths::FIG_DIR)
             .join("latest.fig");
@@ -458,8 +466,9 @@ impl DitRepository {
         git_ops::checkout(&self.root, commit_hash)
             .with_context(|| format!("failed to checkout commit {commit_hash}"))?;
 
-        // Read snapshot at that commit
+        // Read snapshot and find .fig file while at the target commit
         let snapshot = canonical::read_snapshot(&self.root);
+        let fig_file_path = self.get_fig_file_path(commit_hash);
 
         // Always return to original branch, even if read failed
         let checkout_result = git_ops::checkout(&self.root, &original_branch);
@@ -467,9 +476,6 @@ impl DitRepository {
         // Return the snapshot (propagating any errors)
         let snapshot = snapshot.context("failed to read snapshot from commit")?;
         checkout_result.context("failed to return to original branch")?;
-
-        // Check for .fig file
-        let fig_file_path = self.get_fig_file_path(commit_hash);
 
         Ok(RestoreResult {
             snapshot,

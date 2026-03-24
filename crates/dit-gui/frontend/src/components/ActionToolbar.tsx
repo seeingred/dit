@@ -23,6 +23,8 @@ export function ActionToolbar({
 }: ActionToolbarProps) {
   const [commitMsg, setCommitMsg] = useState("");
   const [showCommitInput, setShowCommitInput] = useState(false);
+  const [isPushing, setIsPushing] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const autoResize = useCallback((el: HTMLTextAreaElement) => {
@@ -47,20 +49,26 @@ export function ActionToolbar({
   };
 
   const handlePush = async () => {
+    setIsPushing(true);
     try {
       const result = await push();
       onAction(result);
     } catch (e) {
       onAction(`Push failed: ${e}`);
+    } finally {
+      setIsPushing(false);
     }
   };
 
   const handlePull = async () => {
+    setIsPulling(true);
     try {
       const result = await pull();
       onAction(result);
     } catch (e) {
       onAction(`Pull failed: ${e}`);
+    } finally {
+      setIsPulling(false);
     }
   };
 
@@ -134,22 +142,22 @@ export function ActionToolbar({
           />
           <div className="w-px h-5 bg-dit-border" />
           <ToolbarButton
-            label="Pull"
+            label={isPulling ? "Pulling..." : "Pull"}
             icon={
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                 d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
             }
             onClick={handlePull}
-            disabled={isCommitting}
+            disabled={isCommitting || isPulling || isPushing}
           />
           <ToolbarButton
-            label="Push"
+            label={isPushing ? "Pushing..." : "Push"}
             icon={
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                 d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
             }
             onClick={handlePush}
-            disabled={isCommitting}
+            disabled={isCommitting || isPulling || isPushing}
           />
           <ToolbarButton
             label="Merge"
