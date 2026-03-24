@@ -37,6 +37,8 @@ impl DitPaths {
     pub const ASSETS_DIR: &str = "dit.assets";
     /// Directory containing git-tracked .fig file snapshots.
     pub const FIG_DIR: &str = "dit.fig";
+    /// Directory containing git-tracked preview images.
+    pub const PREVIEWS_DIR: &str = "dit.previews";
 
     // ── Files inside .dit/ ──────────────────────────────────────────────
     /// Project configuration (token, file key, etc.).

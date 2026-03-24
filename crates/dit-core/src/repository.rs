@@ -111,6 +111,8 @@ impl DitRepository {
             .context("failed to create assets directory")?;
         std::fs::create_dir_all(root.join(DitPaths::FIG_DIR))
             .context("failed to create fig directory")?;
+        std::fs::create_dir_all(root.join(DitPaths::PREVIEWS_DIR))
+            .context("failed to create previews directory")?;
 
         Ok(Self { root })
     }
@@ -135,6 +137,10 @@ impl DitRepository {
     }
 
     /// Open an existing DIT repository at `dir`.
+    ///
+    /// If `.dit/config.json` is missing (e.g. after cloning — `.dit/` is
+    /// git-ignored), it is bootstrapped from `dit.json` (the committed
+    /// project file).
     pub fn open(dir: &Path) -> Result<Self> {
         let root = dir
             .canonicalize()
@@ -142,9 +148,40 @@ impl DitRepository {
 
         if !git_ops::is_dit_repo(&root) {
             bail!(
-                "'{}' is not a DIT repository (missing .dit/ directory)",
+                "'{}' is not a DIT repository",
                 root.display()
             );
+        }
+
+        // Bootstrap .dit/config.json from dit.json if missing (post-clone)
+        let config_path = root.join(DitPaths::CONFIG_FILE);
+        if !config_path.exists() {
+            let project_path = root.join(DitPaths::PROJECT_FILE);
+            if project_path.exists() {
+                // Read file_key and name from the committed project file
+                let project_json = std::fs::read_to_string(&project_path)
+                    .context("failed to read dit.json")?;
+                let project: crate::types::DitProject =
+                    crate::canonical::deserialize(&project_json)
+                        .context("failed to parse dit.json")?;
+
+                let config = DitConfig {
+                    file_key: project.file_key,
+                    name: project.name,
+                    figma_token: None,
+                    schema_version: project.schema_version,
+                    ssh_key_path: None,
+                };
+
+                // Create .dit/ and write config
+                let dit_dir = root.join(DitPaths::DIT_DIR);
+                std::fs::create_dir_all(&dit_dir)
+                    .context("failed to create .dit directory")?;
+                let config_json = serde_json::to_string_pretty(&config)
+                    .context("failed to serialize config")?;
+                std::fs::write(&config_path, &config_json)
+                    .context("failed to write config file")?;
+            }
         }
 
         Ok(Self { root })
@@ -259,7 +296,13 @@ impl DitRepository {
         self.pre_stage_fig(&fig_tmp)
             .context("failed to pre-stage .fig file")?;
 
-        // Git commit (includes dit.fig/latest.fig + all previous dit.fig/<hash>.fig)
+        // Pre-stage preview in dit.previews/latest.png so it's included in the commit
+        if preview_tmp.exists() {
+            self.pre_stage_preview(&preview_tmp)
+                .context("failed to pre-stage preview image")?;
+        }
+
+        // Git commit (includes dit.fig/latest.fig + dit.previews/latest.png)
         report("Committing to git...");
         let hash = git_ops::commit_all(&self.root, message)
             .context("failed to git commit")?;
@@ -268,9 +311,8 @@ impl DitRepository {
         self.store_fig_snapshot(&hash, &fig_tmp)
             .context("failed to store .fig snapshot")?;
 
-        // Store preview image if captured
+        // Store named preview copy (dit.previews/<hash>.png)
         if preview_tmp.exists() {
-            report("Storing preview image...");
             self.store_preview(&hash, &preview_tmp)
                 .context("failed to store preview image")?;
             std::fs::remove_file(&preview_tmp).ok();
@@ -347,9 +389,9 @@ impl DitRepository {
         Ok(())
     }
 
-    /// Copy a preview image to `.dit/previews/<7char_hash>.png`.
+    /// Copy a preview image to `dit.previews/<7char_hash>.png` (git-tracked).
     fn store_preview(&self, commit_hash: &str, preview_path: &Path) -> Result<()> {
-        let previews_dir = self.root.join(DitPaths::DIT_DIR).join("previews");
+        let previews_dir = self.root.join(DitPaths::PREVIEWS_DIR);
         std::fs::create_dir_all(&previews_dir)
             .context("failed to create previews directory")?;
 
@@ -358,6 +400,18 @@ impl DitRepository {
         std::fs::copy(preview_path, &dest)
             .with_context(|| format!("failed to copy preview to {}", dest.display()))?;
 
+        Ok(())
+    }
+
+    /// Pre-stage a preview image to `dit.previews/latest.png` so it is included
+    /// in the upcoming git commit. Call this BEFORE `git_ops::commit_all()`.
+    fn pre_stage_preview(&self, preview_path: &Path) -> Result<()> {
+        let previews_dir = self.root.join(DitPaths::PREVIEWS_DIR);
+        std::fs::create_dir_all(&previews_dir)
+            .context("failed to create previews directory")?;
+        let dest = previews_dir.join("latest.png");
+        std::fs::copy(preview_path, &dest)
+            .with_context(|| format!("failed to copy preview to {}", dest.display()))?;
         Ok(())
     }
 

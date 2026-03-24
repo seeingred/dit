@@ -21,6 +21,7 @@ const DIT_TRACKED: &[&str] = &[
     DitPaths::NODES_DIR,         // dit.nodes/
     DitPaths::ASSETS_DIR,        // dit.assets/
     DitPaths::FIG_DIR,           // dit.fig/
+    DitPaths::PREVIEWS_DIR,      // dit.previews/
     DitPaths::STYLES_FILE,       // dit.styles.json
     DitPaths::COMPONENTS_FILE,   // dit.components.json
 ];
@@ -100,9 +101,15 @@ pub fn is_git_repo(path: &Path) -> bool {
     Repository::discover(path).is_ok()
 }
 
-/// Check whether `path` is a DIT repository (git repo + `.dit/` directory).
+/// Check whether `path` is a DIT repository.
+///
+/// A DIT repo is a git repo that has either `.dit/` (local config) or
+/// `dit.json` (committed project file — present after cloning a DIT repo
+/// even though `.dit/` is git-ignored).
 pub fn is_dit_repo(path: &Path) -> bool {
-    is_git_repo(path) && path.join(DitPaths::DIT_DIR).is_dir()
+    is_git_repo(path)
+        && (path.join(DitPaths::DIT_DIR).is_dir()
+            || path.join(DitPaths::PROJECT_FILE).exists())
 }
 
 // ── Status ───────────────────────────────────────────────────────────

@@ -521,15 +521,27 @@ async fn get_preview_image(
 ) -> Result<Option<String>, String> {
     with_repo(&state, |repo| {
         // Try to find a preview image for this commit.
-        // Convention: .dit/previews/<hash>.png
-        let preview_path = repo
-            .root()
+        // Convention: dit.previews/<hash>.png (git-tracked)
+        let short = &commit_hash[..7.min(commit_hash.len())];
+        let preview_dir = repo.root().join(DitPaths::PREVIEWS_DIR);
+        let preview_path = preview_dir.join(format!("{short}.png"));
+
+        // Fall back to legacy .dit/previews/ location
+        let legacy_path = repo.root()
             .join(DitPaths::DIT_DIR)
             .join("previews")
-            .join(format!("{}.png", &commit_hash[..7.min(commit_hash.len())]));
+            .join(format!("{short}.png"));
 
-        if preview_path.exists() {
-            let bytes = std::fs::read(&preview_path)?;
+        let path = if preview_path.exists() {
+            Some(preview_path)
+        } else if legacy_path.exists() {
+            Some(legacy_path)
+        } else {
+            None
+        };
+
+        if let Some(p) = path {
+            let bytes = std::fs::read(&p)?;
             let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
             Ok(Some(encoded))
         } else {
@@ -545,11 +557,16 @@ async fn get_diff_previews(
     hash2: String,
 ) -> Result<DiffResult, String> {
     with_repo(&state, |repo| {
-        let preview_dir = repo.root().join(DitPaths::DIT_DIR).join("previews");
+        let preview_dir = repo.root().join(DitPaths::PREVIEWS_DIR);
+        let legacy_dir = repo.root().join(DitPaths::DIT_DIR).join("previews");
 
         let load = |hash: &str| -> Option<String> {
-            let path = preview_dir.join(format!("{}.png", &hash[..7.min(hash.len())]));
-            std::fs::read(&path)
+            let short = &hash[..7.min(hash.len())];
+            let name = format!("{short}.png");
+            let path = preview_dir.join(&name);
+            let legacy = legacy_dir.join(&name);
+            let p = if path.exists() { path } else { legacy };
+            std::fs::read(&p)
                 .ok()
                 .map(|bytes| base64::engine::general_purpose::STANDARD.encode(&bytes))
         };

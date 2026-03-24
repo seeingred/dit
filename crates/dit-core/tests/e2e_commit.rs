@@ -136,8 +136,7 @@ fn setup() -> (TempDir, DitRepository, String, CommitMode) {
 fn assert_preview_exists(repo_root: &Path, commit_hash: &str) {
     let short_hash = &commit_hash[..7.min(commit_hash.len())];
     let preview_path = repo_root
-        .join(DitPaths::DIT_DIR)
-        .join("previews")
+        .join(DitPaths::PREVIEWS_DIR)
         .join(format!("{short_hash}.png"));
     assert!(
         preview_path.exists(),
@@ -319,13 +318,11 @@ fn test_multiple_commits_have_separate_snapshots() {
         let short2 = &hash2[..7.min(hash2.len())];
         let preview1 = repo
             .root()
-            .join(DitPaths::DIT_DIR)
-            .join("previews")
+            .join(DitPaths::PREVIEWS_DIR)
             .join(format!("{short1}.png"));
         let preview2 = repo
             .root()
-            .join(DitPaths::DIT_DIR)
-            .join("previews")
+            .join(DitPaths::PREVIEWS_DIR)
             .join(format!("{short2}.png"));
 
         assert!(
